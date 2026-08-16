@@ -1,0 +1,22 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+
+node_modules/
+web/node_modules/
+web/dist/
+server/node_modules/
+
+# 根仓库会忽略通用 scripts 目录；扩展的部署与验证脚本属于源码。
+!server/scripts/
+!server/scripts/**
+
+coverage/
+data/
+server/data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.dump

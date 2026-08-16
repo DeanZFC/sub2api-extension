@@ -1,0 +1,21 @@
+{
+  "name": "sub2api-extension-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "db:setup": "node scripts/setup-postgres.js",
+    "db:verify": "node scripts/verify-postgres.js",
+    "db:verify-features": "node scripts/verify-postgres-features.js",
+    "env:verify": "node scripts/verify-real-environment.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "pg": "8.16.3"
+  }
+}

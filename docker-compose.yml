@@ -1,0 +1,25 @@
+services:
+  extension:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sub2api-extension:local
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8081
+      DB_PATH: /app/data/extension.sqlite
+      PUBLIC_DIR: /app/web/dist
+    volumes:
+      - extension_data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+
+volumes:
+  extension_data:
+    name: sub2api-extension-data

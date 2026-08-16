@@ -1,0 +1,28 @@
+{
+  "name": "sub2api-extension-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc -b --pretty false",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "2.3.2",
+    "pinia": "3.0.3",
+    "vue": "3.5.22",
+    "vue-router": "4.5.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "@vitejs/plugin-vue": "5.2.4",
+    "typescript": "5.9.3",
+    "vite": "6.4.3",
+    "vitest": "4.1.5",
+    "vue-tsc": "2.2.12"
+  },
+  "packageManager": "pnpm@10.12.1+sha512.f0dda8580f0ee9481c5c79a1d927b9164f2c478e90992ad268bbb2465a736984391d6333d2c327913578b2804af33474ca554ba29c04a8b13060a717675ae3ac"
+}
