@@ -217,6 +217,9 @@ export function registerRoutes(router, services) {
   router.add('POST', '/api/activities/:type/:id/participate', { auth: true, csrf: true }, async ({ response, params, session }) => {
     success(response, await activities.participate(params.type, params.id, session.user_id));
   });
+  router.add('DELETE', '/api/activities/:type/:id/participation', { auth: true, csrf: true }, async ({ response, params, session }) => {
+    success(response, await activities.withdraw(params.type, params.id, session.user_id));
+  });
 
   router.add('GET', '/api/admin/group-grants/groups', { admin: true }, async ({ response }) => {
     success(response, await groupEntitlements.groups(true));

@@ -271,11 +271,13 @@ export interface UserActivity {
   auto_draw_at?: string | null
   drawn_at?: string | null
   action_label: string
+  can_withdraw?: boolean
   group_id?: number
   group_name?: string
   reward?: { type: 'none' | 'balance'; value: number }
   participation?: {
     participated?: boolean
+    can_withdraw?: boolean
     checked_today?: boolean
     total_days?: number
     streak_days?: number

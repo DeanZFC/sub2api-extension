@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { ArrowLeft, Calendar, Check, Key, Present } from '@element-plus/icons-vue'
-import { getActivity, participateInActivity } from '@/api/activities'
+import { ArrowLeft, Calendar, Check, Close, Key, Present } from '@element-plus/icons-vue'
+import { getActivity, participateInActivity, withdrawFromActivity } from '@/api/activities'
 import { errorMessage } from '@/api/client'
 import ConditionSummary from '@/components/ConditionSummary.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import { formatActivityDate } from '@/domain/time'
 import { useNotificationsStore } from '@/stores/notifications'
@@ -16,6 +17,8 @@ const activity = ref<UserActivity | null>(null)
 const loading = ref(true)
 const error = ref('')
 const participating = ref(false)
+const withdrawConfirmOpen = ref(false)
+const withdrawing = ref(false)
 const type = computed(() => route.params.type as ActivityType)
 const id = computed(() => String(route.params.id || ''))
 const icons = { lottery: Present, checkin: Calendar, group_entitlement: Key }
@@ -56,6 +59,30 @@ async function participate(): Promise<void> {
   }
 }
 
+function requestLotteryAction(): void {
+  const item = activity.value
+  if (!item || item.type !== 'lottery') return
+  if (item.participated) {
+    if (item.can_withdraw) withdrawConfirmOpen.value = true
+    return
+  }
+  void participate()
+}
+
+async function confirmWithdraw(): Promise<void> {
+  if (!activity.value || activity.value.type !== 'lottery' || withdrawing.value) return
+  withdrawing.value = true
+  try {
+    activity.value = await withdrawFromActivity(type.value, id.value)
+    withdrawConfirmOpen.value = false
+    notices.show('已退出抽奖，可在参与截止前重新参与', 'success')
+  } catch (cause) {
+    notices.show(errorMessage(cause), 'error')
+  } finally {
+    withdrawing.value = false
+  }
+}
+
 function dateRange(item: UserActivity): string {
   if (!item.starts_at && !item.ends_at) return '长期开放'
   return `${formatDate(item.starts_at) || '现在'} ~ ${formatDate(item.ends_at) || '长期'}`
@@ -69,7 +96,9 @@ function formatDate(value?: string | null): string {
 const actionDisabled = computed(() => {
   const item = activity.value
   if (!item || item.status !== 'active') return true
-  if (item.type === 'lottery') return item.phase !== 'active' || Boolean(item.participated)
+  if (item.type === 'lottery') {
+    return item.phase !== 'active' || (Boolean(item.participated) && !item.can_withdraw)
+  }
   if (item.type === 'checkin') return Boolean(item.participation?.checked_today)
   return Boolean(item.granted)
 })
@@ -78,7 +107,7 @@ const actionText = computed(() => {
   const item = activity.value
   if (!item) return ''
   if (item.type === 'lottery') {
-    if (item.participated) return '已参与抽奖'
+    if (item.participated) return item.can_withdraw ? '退出抽奖' : '已参与抽奖'
     return item.phase === 'active' && item.status === 'active' ? '参与抽奖' : '参与已结束'
   }
   if (item.type === 'checkin') return item.participation?.checked_today ? '今日已签到' : '立即签到'
@@ -182,8 +211,8 @@ onMounted(load)
         <template v-if="activity.type === 'lottery'">
           <div v-if="activity.winner" class="activity-result activity-result--success"><Check /><div><strong>恭喜中奖</strong><span>{{ activity.winner.prize_name }}{{ activity.winner.reward_type === 'balance' ? ` · ${activity.winner.reward_value} 余额` : '' }}</span></div></div>
           <div v-else-if="activity.drawn_at && activity.participated" class="activity-result"><Present /><div><strong>本次未中奖</strong><span>本次抽奖已经结束</span></div></div>
-          <button class="activity-primary-action" type="button" :disabled="actionDisabled || participating" @click="participate">
-            <Present />
+          <button class="activity-primary-action" type="button" :disabled="actionDisabled || participating || withdrawing" @click="requestLotteryAction">
+            <component :is="activity.participated ? Close : Present" />
             {{ participating ? '正在检查…' : actionText }}
           </button>
           <p v-if="activity.participated" class="lottery-draw-time"><Calendar />{{ lotteryDrawTime(activity) }}</p>
@@ -226,6 +255,17 @@ onMounted(load)
       </section>
 
     </template>
+
+    <ConfirmDialog
+      :open="withdrawConfirmOpen"
+      title="退出抽奖"
+      message="退出后你将不再进入本次抽奖的候选名单，确认退出吗？"
+      confirm-label="确认退出"
+      danger
+      :busy="withdrawing"
+      @close="withdrawConfirmOpen = false"
+      @confirm="confirmWithdraw"
+    />
   </div>
 </template>
 

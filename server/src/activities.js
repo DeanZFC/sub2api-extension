@@ -75,6 +75,15 @@ export class ActivityService {
     return { ...this.#lotteryDetail(positiveId(idValue), positiveId(userIdValue, 'user_id')), ...result };
   }
 
+  async withdraw(typeValue, idValue, userIdValue) {
+    const type = normalizeActivityType(typeValue);
+    if (type !== 'lottery') {
+      throw badRequest('ACTIVITY_WITHDRAW_UNSUPPORTED', '只有抽奖活动支持退出参与');
+    }
+    const result = await this.lotteries.withdraw(idValue, userIdValue);
+    return { ...this.#lotteryDetail(positiveId(idValue), positiveId(userIdValue, 'user_id')), ...result };
+  }
+
   listCheckins() {
     const rows = this.db.prepare('SELECT * FROM checkin_campaigns ORDER BY id DESC').all();
     return { items: rows.map((row) => checkinToAdminApi(row, this.db)), total: rows.length };
@@ -439,6 +448,9 @@ function lotterySummary(row, userId, db) {
   `).get(row.id, userId);
   const winner = db.prepare('SELECT id FROM winners WHERE lottery_id = ? AND user_id = ?').get(row.id, userId);
   const entry = db.prepare('SELECT id FROM lottery_entries WHERE lottery_id = ? AND user_id = ?').get(row.id, userId);
+  const canWithdraw = Boolean(
+    entry && row.status === 'active' && windowStatus(row.starts_at, earliestDate(row.ends_at, row.auto_draw_at)) === 'active'
+  );
   return {
     id: String(row.id),
     type: 'lottery',
@@ -451,8 +463,10 @@ function lotterySummary(row, userId, db) {
     auto_draw_at: row.auto_draw_at || null,
     drawn_at: row.drawn_at || null,
     action_label: row.drawn_at ? '查看结果' : entry ? '已参与' : '参与抽奖',
+    can_withdraw: canWithdraw,
     participation: {
       participated: Boolean(entry),
+      can_withdraw: canWithdraw,
       eligibility_confirmed: Boolean(candidate),
       eligible: candidate ? Boolean(candidate.eligible) : null,
       won: Boolean(winner)

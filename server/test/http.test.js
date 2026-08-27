@@ -234,6 +234,77 @@ test('接口限流写入可追踪日志且不保存查询参数中的令牌', as
   assert.equal(blocked.result_code, 'RATE_LIMITED');
 });
 
+test('抽奖退出接口要求登录和 CSRF，并且只能退出当前会话用户的参与记录', async (t) => {
+  const user = {
+    id: 2,
+    email: 'participant@example.com',
+    username: 'participant',
+    role: 'user',
+    status: 'active',
+    balance: 10,
+    total_recharged: 10,
+    created_at: '2026-01-01T00:00:00Z'
+  };
+  const client = {
+    async authMe(token) {
+      assert.equal(token, 'participant-jwt');
+      return user;
+    },
+    async getUser(userId) {
+      assert.equal(userId, user.id);
+      return user;
+    },
+    async getUserBalanceHistory(userId) {
+      assert.equal(userId, user.id);
+      return { total_recharged: 10, items: [], pages: 1 };
+    }
+  };
+  const config = {
+    host: '127.0.0.1', port: 0, dbPath: ':memory:',
+    sessionSecret: 'x'.repeat(64), sessionCookieName: 'ext_session',
+    sessionCookieSecure: false, sessionCookieSameSite: 'lax', sessionTtlMs: 3_600_000,
+    outboxIntervalMs: 10_000, autoDrawIntervalMs: 10_000, rewardCodePrefix: 'S2EXT-',
+    bodyLimitBytes: 32_768, localTestEnabled: false
+  };
+  const app = createApplication(config, { client });
+  t.after(() => app.close());
+
+  const lottery = app.services.lotteries.create({
+    name: 'HTTP 退出测试',
+    description: '',
+    condition: { type: 'group', operator: 'and', children: [] },
+    prizes: [{ name: '测试奖品', winner_count: 1, reward_type: 'manual', reward_value: 0, sort_order: 0 }]
+  }, 99);
+  app.services.lotteries.start(lottery.id, 99);
+
+  const entry = await invoke(app.handler, 'GET', '/entry/activities?token=participant-jwt');
+  const cookie = entry.getHeader('set-cookie').split(';', 1)[0];
+  const session = await invoke(app.handler, 'GET', '/api/session', { cookie });
+  const csrf = JSON.parse(session.body).data.csrf_token;
+
+  const withoutCsrf = await invoke(app.handler, 'DELETE', `/api/activities/lottery/${lottery.id}/participation`, { cookie });
+  assert.equal(withoutCsrf.statusCode, 403);
+
+  const joined = await invoke(app.handler, 'POST', `/api/activities/lottery/${lottery.id}/participate`, {
+    cookie, 'x-csrf-token': csrf
+  });
+  assert.equal(joined.statusCode, 200);
+  assert.equal(JSON.parse(joined.body).data.participated, true);
+
+  const withdrawn = await invoke(app.handler, 'DELETE', `/api/activities/lottery/${lottery.id}/participation`, {
+    cookie, 'x-csrf-token': csrf
+  });
+  assert.equal(withdrawn.statusCode, 200);
+  assert.equal(JSON.parse(withdrawn.body).data.withdrawn, true);
+  assert.equal(app.services.db.prepare('SELECT COUNT(*) AS count FROM lottery_entries WHERE user_id = 2').get().count, 0);
+
+  const unsupported = await invoke(app.handler, 'DELETE', '/api/activities/checkin/1/participation', {
+    cookie, 'x-csrf-token': csrf
+  });
+  assert.equal(unsupported.statusCode, 400);
+  assert.equal(JSON.parse(unsupported.body).code, 'ACTIVITY_WITHDRAW_UNSUPPORTED');
+});
+
 async function invoke(handler, method, url, headers = {}, body = undefined) {
   const encoded = body === undefined ? [] : [Buffer.from(JSON.stringify(body))];
   const request = Readable.from(encoded);

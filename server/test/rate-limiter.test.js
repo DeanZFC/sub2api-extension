@@ -24,6 +24,7 @@ test('仅显式信任代理时读取有效 X-Real-IP', () => {
   assert.equal(clientIp(request, false), '127.0.0.1');
   assert.equal(clientIp(request, true), '203.0.113.9');
   assert.equal(rateLimitScope('POST', '/api/activities/lottery/1/participate'), 'participate');
+  assert.equal(rateLimitScope('DELETE', '/api/activities/lottery/1/participation'), 'participate');
   assert.equal(rateLimitScope('GET', '/api/admin/request-logs'), 'admin');
 });
 

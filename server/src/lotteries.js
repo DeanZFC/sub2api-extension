@@ -24,6 +24,7 @@ export class LotteryService {
     this.syncService = syncService;
     this.config = config;
     this.generating = new Set();
+    this.entryLocks = new Map();
     this.autoDrawTimer = null;
     this.autoDrawing = false;
   }
@@ -210,6 +211,10 @@ export class LotteryService {
   async participate(idValue, userIdValue) {
     const id = positiveId(idValue);
     const userId = positiveId(userIdValue, 'user_id');
+    return this.#withEntryLock(id, userId, () => this.#participate(id, userId));
+  }
+
+  async #participate(id, userId) {
     let lottery = this.#row(id);
     if (!lottery.published) throw notFound('抽奖活动');
 
@@ -273,6 +278,41 @@ export class LotteryService {
     });
     const entry = this.db.prepare('SELECT * FROM lottery_entries WHERE lottery_id = ? AND user_id = ?').get(id, userId);
     return entryResult(entry, true);
+  }
+
+  async withdraw(idValue, userIdValue) {
+    const id = positiveId(idValue);
+    const userId = positiveId(userIdValue, 'user_id');
+    return this.#withEntryLock(id, userId, () => this.#withdraw(id, userId));
+  }
+
+  async #withdraw(id, userId) {
+    let withdrawn = false;
+    transaction(this.db, () => {
+      // Acquire the lottery row as a write lock before checking its state. This
+      // serializes withdrawal with snapshot generation, locking, and drawing
+      // in both SQLite and PostgreSQL.
+      const claimed = this.db.prepare(`
+        UPDATE lotteries SET updated_at = updated_at
+        WHERE id = ? AND published = 1 AND status = 'active'
+      `).run(id);
+      if (Number(claimed.changes) !== 1) {
+        const lottery = this.#row(id);
+        if (!lottery.published) throw notFound('抽奖活动');
+        throw conflict('LOTTERY_WITHDRAW_CLOSED', '抽奖已停止参与，不能退出');
+      }
+      const lottery = this.#row(id);
+      if (lotteryWindowStatus(lottery.starts_at, lottery.ends_at, lottery.auto_draw_at) !== 'active') {
+        throw conflict('LOTTERY_WITHDRAW_CLOSED', '抽奖参与已结束，不能退出');
+      }
+      const entry = this.db.prepare('SELECT id FROM lottery_entries WHERE lottery_id = ? AND user_id = ?').get(id, userId);
+      if (!entry) return;
+      this.db.prepare('DELETE FROM candidate_snapshots WHERE lottery_id = ? AND user_id = ?').run(id, userId);
+      this.db.prepare('DELETE FROM lottery_entries WHERE lottery_id = ? AND user_id = ?').run(id, userId);
+      audit(this.db, userId, 'lottery.entry_withdrawn', 'lottery', id);
+      withdrawn = true;
+    });
+    return { participated: false, withdrawn };
   }
 
   async generateSnapshot(idValue, actorUserId) {
@@ -510,6 +550,38 @@ export class LotteryService {
     }
   }
 
+  async #withEntryLock(lotteryId, userId, callback) {
+    const key = `${lotteryId}:${userId}`;
+    const previous = this.entryLocks.get(key) || Promise.resolve();
+    let release;
+    const turn = new Promise((resolve) => { release = resolve; });
+    this.entryLocks.set(key, turn);
+    await previous;
+    let releaseDistributed = null;
+    try {
+      releaseDistributed = await this.#acquireDistributedEntryLock(lotteryId, userId);
+      return await callback();
+    } finally {
+      try { releaseDistributed?.(); } catch { /* connection close also releases PostgreSQL advisory locks */ }
+      release();
+      if (this.entryLocks.get(key) === turn) this.entryLocks.delete(key);
+    }
+  }
+
+  async #acquireDistributedEntryLock(lotteryId, userId) {
+    if (this.db.dialect !== 'postgres') return null;
+    const lockName = `sub2api-extension:lottery-entry:${lotteryId}:${userId}`;
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      const row = this.db.prepare('SELECT pg_try_advisory_lock(hashtext(?)) AS acquired').get(lockName);
+      if (row?.acquired) {
+        return () => this.db.prepare('SELECT pg_advisory_unlock(hashtext(?)) AS released').get(lockName);
+      }
+      await delay(50);
+    }
+    throw conflict('LOTTERY_ENTRY_BUSY', '该用户的抽奖参与正在处理中，请稍后重试');
+  }
+
   #invalidateSnapshot(lotteryId) {
     this.db.prepare('DELETE FROM candidate_snapshots WHERE lottery_id = ?').run(lotteryId);
     this.db.prepare(`
@@ -577,6 +649,10 @@ export class LotteryService {
       updated_at: row.updated_at
     };
   }
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function participantSystemReasons(user, activityName) {

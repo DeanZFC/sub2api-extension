@@ -73,7 +73,8 @@ export function clientIp(request, trustProxy = false) {
 export function rateLimitScope(methodValue, pathname) {
   const method = String(methodValue || 'GET').toUpperCase();
   if (pathname.startsWith('/entry/') || pathname.startsWith('/local-test/')) return 'entry';
-  if (method === 'POST' && /^\/api\/activities\/[^/]+\/[^/]+\/participate$/.test(pathname)) return 'participate';
+  if ((method === 'POST' && /^\/api\/activities\/[^/]+\/[^/]+\/participate$/.test(pathname))
+    || (method === 'DELETE' && /^\/api\/activities\/[^/]+\/[^/]+\/participation$/.test(pathname))) return 'participate';
   if (pathname.startsWith('/api/admin/')) return 'admin';
   if (pathname.startsWith('/api/') && !['GET', 'HEAD', 'OPTIONS'].includes(method)) return 'write';
   if (pathname.startsWith('/api/')) return 'api';

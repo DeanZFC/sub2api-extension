@@ -17,3 +17,10 @@ export function participateInActivity(type: ActivityType, id: string): Promise<U
     { method: 'POST' }
   )
 }
+
+export function withdrawFromActivity(type: ActivityType, id: string): Promise<UserActivity> {
+  return apiRequest(
+    `/api/activities/${encodeURIComponent(type)}/${encodeURIComponent(id)}/participation`,
+    { method: 'DELETE' }
+  )
+}

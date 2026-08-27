@@ -99,6 +99,126 @@ test('参与抽奖只刷新当前用户且开奖沿用参与时资格', async (t
   assert.equal(refreshed, 1, '生成和锁定名单不应再次查询用户或执行全量同步');
 });
 
+test('已参与用户可以在名单生成前退出，退出后可重新参与', async (t) => {
+  const db = openDatabase(':memory:');
+  t.after(() => db.close());
+  const sync = {
+    async refreshUser(userId) {
+      upsertSyncedUser(db, {
+        id: userId,
+        email: 'withdraw@example.com',
+        username: 'withdraw-user',
+        role: 'user',
+        status: 'active',
+        balance: 10,
+        total_recharged: 10,
+        allowed_groups: [],
+        created_at: '2026-01-01T00:00:00Z'
+      });
+      return db.prepare('SELECT * FROM synced_users WHERE user_id = ?').get(userId);
+    }
+  };
+  const service = new LotteryService(db, sync, { rewardCodePrefix: 'S2EXT-' });
+  const lottery = service.create({
+    name: '可退出抽奖',
+    description: '',
+    condition: { type: 'group', operator: 'and', children: [] },
+    prizes: [{ name: '测试奖品', winner_count: 1, reward_type: 'manual', reward_value: 0, sort_order: 0 }]
+  }, 99);
+  service.start(lottery.id, 99);
+
+  const entry = await service.participate(lottery.id, 1);
+  assert.equal(entry.participated, true);
+  const withdraw = await service.withdraw(lottery.id, 1);
+  assert.deepEqual(withdraw, { participated: false, withdrawn: true });
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM lottery_entries WHERE lottery_id = ? AND user_id = ?').get(lottery.id, 1).count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'lottery.entry_withdrawn' AND entity_id = ?").get(String(lottery.id)).count, 1);
+
+  const repeated = await service.withdraw(lottery.id, 1);
+  assert.deepEqual(repeated, { participated: false, withdrawn: false }, '没有参与记录时重复退出应保持幂等');
+  const rejoined = await service.participate(lottery.id, 1);
+  assert.equal(rejoined.participated, true, '退出后应可在截止前重新参与');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM lottery_entries WHERE lottery_id = ? AND user_id = ?').get(lottery.id, 1).count, 1);
+});
+
+test('候选名单生成、锁定或开奖后不能退出抽奖', async (t) => {
+  const db = openDatabase(':memory:');
+  t.after(() => db.close());
+  const sync = {
+    async refreshUser(userId) {
+      upsertSyncedUser(db, {
+        id: userId,
+        email: `closed-${userId}@example.com`,
+        role: 'user',
+        status: 'active',
+        balance: 10,
+        total_recharged: 10,
+        allowed_groups: [],
+        created_at: '2026-01-01T00:00:00Z'
+      });
+      return db.prepare('SELECT * FROM synced_users WHERE user_id = ?').get(userId);
+    }
+  };
+  const service = new LotteryService(db, sync, { rewardCodePrefix: 'S2EXT-' });
+  const statuses = ['snapshot_ready', 'locked', 'drawn'];
+  for (const status of statuses) {
+    const lottery = service.create({
+      name: `不可退出-${status}`,
+      description: '',
+      condition: { type: 'group', operator: 'and', children: [] },
+      prizes: [{ name: '测试奖品', winner_count: 1, reward_type: 'manual', reward_value: 0, sort_order: 0 }]
+    }, 99);
+    service.start(lottery.id, 99);
+    await service.participate(lottery.id, 1);
+    db.prepare('UPDATE lotteries SET status = ? WHERE id = ?').run(status, lottery.id);
+    await assert.rejects(
+      () => service.withdraw(lottery.id, 1),
+      (error) => error.code === 'LOTTERY_WITHDRAW_CLOSED'
+    );
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM lottery_entries WHERE lottery_id = ? AND user_id = 1').get(lottery.id).count, 1);
+  }
+});
+
+test('活动结束或自动开奖时间到达后不能退出抽奖', async (t) => {
+  const db = openDatabase(':memory:');
+  t.after(() => db.close());
+  const sync = {
+    async refreshUser(userId) {
+      upsertSyncedUser(db, {
+        id: userId,
+        email: 'window-closed@example.com',
+        role: 'user',
+        status: 'active',
+        balance: 10,
+        total_recharged: 10,
+        allowed_groups: [],
+        created_at: '2026-01-01T00:00:00Z'
+      });
+      return db.prepare('SELECT * FROM synced_users WHERE user_id = ?').get(userId);
+    }
+  };
+  const service = new LotteryService(db, sync, { rewardCodePrefix: 'S2EXT-' });
+  for (const [field, value] of [
+    ['ends_at', new Date(Date.now() - 1_000).toISOString()],
+    ['auto_draw_at', new Date(Date.now() - 1_000).toISOString()]
+  ]) {
+    const lottery = service.create({
+      name: `窗口结束-${field}`,
+      description: '',
+      condition: { type: 'group', operator: 'and', children: [] },
+      prizes: [{ name: '测试奖品', winner_count: 1, reward_type: 'manual', reward_value: 0, sort_order: 0 }]
+    }, 99);
+    service.start(lottery.id, 99);
+    await service.participate(lottery.id, 1);
+    db.prepare(`UPDATE lotteries SET ${field} = ? WHERE id = ?`).run(value, lottery.id);
+    await assert.rejects(
+      () => service.withdraw(lottery.id, 1),
+      (error) => error.code === 'LOTTERY_WITHDRAW_CLOSED'
+    );
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM lottery_entries WHERE lottery_id = ? AND user_id = 1').get(lottery.id).count, 1);
+  }
+});
+
 test('进行中的抽奖可以删除并清理参与记录', async (t) => {
   const db = openDatabase(':memory:');
   t.after(() => db.close());
