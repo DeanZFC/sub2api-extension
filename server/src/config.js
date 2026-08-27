@@ -80,7 +80,7 @@ export function loadConfig(env = process.env) {
   const sub2apiBaseUrl = cleanBaseUrl(env.SUB2API_BASE_URL || '');
   return {
     host: env.HOST || '0.0.0.0',
-    port: Number(env.PORT || 8081),
+    port: Number(env.PORT || 18084),
     sub2apiBaseUrl,
     sub2apiAdminApiKey: env.SUB2API_ADMIN_API_KEY || '',
     sessionSecret: env.SESSION_SECRET || '',

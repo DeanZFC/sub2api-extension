@@ -129,7 +129,7 @@ ACTIVITY_TIME_ZONE=Asia/Shanghai
 
 ## 5. 构建并启动
 
-生产 Compose 使用 Linux 的 host 网络。扩展监听应用服务器的 `0.0.0.0:8081`，供另一台 Nginx 服务器反向代理。默认数据库文件位于命名卷 `sub2api-extension-data`；如果 `.env` 设置了 `DATABASE_URL`，才会使用独立 PostgreSQL。
+生产 Compose 使用 Linux 的 host 网络。扩展默认监听应用服务器的 `0.0.0.0:18084`，也可以通过 `.env` 中的 `PORT` 修改，供另一台 Nginx 服务器反向代理。默认数据库文件位于命名卷 `sub2api-extension-data`；如果 `.env` 设置了 `DATABASE_URL`，才会使用独立 PostgreSQL。
 
 ```bash
 cd /opt/sub2api-extension
@@ -138,7 +138,7 @@ docker compose build
 docker compose up -d
 docker compose ps
 docker compose logs --tail=200 extension
-curl --fail http://127.0.0.1:8081/health
+curl --fail http://127.0.0.1:18084/health
 ```
 
 SQLite 会在服务启动时自动创建和升级表结构。使用 PostgreSQL 时，服务启动也会自动执行幂等迁移。健康检查成功后应返回 HTTP 200。
@@ -156,14 +156,14 @@ systemctl enable docker
 docker compose restart extension
 ```
 
-## 6. 限制应用服务器的 8081 端口
+## 6. 限制应用服务器的 18084 端口
 
-优先让两台服务器通过内网 IP 或 WireGuard 等私有网络通信。应用服务器必须在云安全组和系统防火墙中，将 TCP `8081` 的入站来源限制为 Nginx 服务器 IP，不能向整个公网开放。
+优先让两台服务器通过内网 IP 或 WireGuard 等私有网络通信。应用服务器必须在云安全组和系统防火墙中，将 TCP `18084` 的入站来源限制为 Nginx 服务器 IP，不能向整个公网开放。
 
 例如应用服务器使用 UFW 时，将占位符替换为 Nginx 服务器访问应用服务器时使用的源 IP：
 
 ```bash
-sudo ufw allow from NGINX_SERVER_IP to any port 8081 proto tcp
+sudo ufw allow from NGINX_SERVER_IP to any port 18084 proto tcp
 sudo ufw status numbered
 ```
 
@@ -172,10 +172,10 @@ sudo ufw status numbered
 从 Nginx 服务器测试后端连接，成功时应返回 HTTP 200：
 
 ```bash
-curl --fail http://EXTENSION_SERVER_PRIVATE_IP:8081/health
+curl --fail http://EXTENSION_SERVER_PRIVATE_IP:18084/health
 ```
 
-如果两台服务器之间只能走公网，仍必须把 `8081` 限制为仅允许 Nginx 服务器公网 IP。由于入口请求包含短期登录令牌，更推荐建立私有网络或在应用服务器上再启用回源 HTTPS，不应让两台服务器之间的敏感流量长期通过明文公网传输。
+如果两台服务器之间只能走公网，仍必须把 `18084` 限制为仅允许 Nginx 服务器公网 IP。由于入口请求包含短期登录令牌，更推荐建立私有网络或在应用服务器上再启用回源 HTTPS，不应让两台服务器之间的敏感流量长期通过明文公网传输。
 
 ## 7. 在独立 Nginx 服务器配置 HTTPS
 
@@ -229,7 +229,7 @@ curl --fail https://extension.example.com/health
 
 ```bash
 docker compose restart extension
-curl --fail http://127.0.0.1:8081/health
+curl --fail http://127.0.0.1:18084/health
 ```
 
 不要执行 `docker-compose down -v`，否则会删除 SQLite 命名卷。SQLite 部署应按 README 的备份步骤复制数据库文件；PostgreSQL 部署仍应对 `sub2api_extension` 独立数据库配置定期 `pg_dump` 备份。

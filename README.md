@@ -89,10 +89,10 @@ docker compose ps
 docker compose logs -f extension
 ```
 
-默认监听 `0.0.0.0:8081` 供反向代理回源。设置 `DATABASE_URL` 时活动数据保存在独立 PostgreSQL；不设置时使用命名卷 `sub2api-extension-data` 中的 SQLite。健康检查地址为 `http://127.0.0.1:8081/health`。
+默认监听 `0.0.0.0:18084` 供反向代理回源，也可以通过 `.env` 中的 `PORT` 修改。设置 `DATABASE_URL` 时活动数据保存在独立 PostgreSQL；不设置时使用命名卷 `sub2api-extension-data` 中的 SQLite。健康检查地址为 `http://127.0.0.1:18084/health`。
 
 ```bash
-curl --fail http://127.0.0.1:8081/health
+curl --fail http://127.0.0.1:18084/health
 ```
 
 ## HTTPS 反向代理示例
@@ -118,7 +118,7 @@ server {
     }
 
     location / {
-        proxy_pass http://127.0.0.1:8081;
+        proxy_pass http://127.0.0.1:18084;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -195,8 +195,8 @@ LOCAL_TEST_SECRET=至少32字符的随机值
 启动服务后，通过真实 Sub2API 用户 ID 进入：
 
 ```text
-http://127.0.0.1:8081/local-test/entry?secret=本地测试密钥&user_id=1&next=/admin/lotteries
-http://127.0.0.1:8081/local-test/entry?secret=本地测试密钥&user_id=2&next=/
+http://127.0.0.1:18084/local-test/entry?secret=本地测试密钥&user_id=1&next=/admin/lotteries
+http://127.0.0.1:18084/local-test/entry?secret=本地测试密钥&user_id=2&next=/
 ```
 
 该入口同时校验回环来源和独立密钥，并通过管理员 API 实时读取目标用户的真实角色；不会修改上游用户。同一浏览器的管理员和普通用户共享会话 Cookie，打开另一个角色入口会切换当前身份。结束本地测试后必须设置 `LOCAL_TEST_ENABLED=false`，生产环境禁止开启。
@@ -231,7 +231,7 @@ docker compose build --pull
 docker compose up -d
 docker compose ps
 docker compose logs --tail=200 extension
-curl --fail http://127.0.0.1:8081/health
+curl --fail http://127.0.0.1:18084/health
 ```
 
 服务启动时会自动执行所选数据库的结构迁移。SQLite 模式不要在升级过程中删除 `sub2api-extension-data` 卷，也不要使用 `docker compose down -v`，否则会删除持久化数据库。
@@ -243,4 +243,4 @@ curl --fail http://127.0.0.1:8081/health
 - iframe 内反复要求登录：先确认全站 HTTPS；跨站部署再检查是否同时使用 `SameSite=None` 和 `Secure`。
 - 充值后无法申请专属分组：确认 Sub2API 中目标分组已启用并设为专属分组，再让用户进入对应资格活动手动点击申请；页面会实时返回余额或充值条件未满足的具体原因。
 - 规则显示符合但用户原 API Key 倍率没变：自动授权只追加 `allowed_groups`，不会迁移已有 API Key；请检查该 Key 绑定的分组。
-- 反向代理返回 502：检查 `docker compose ps`、容器日志以及宿主机 `127.0.0.1:8081/health`。
+- 反向代理返回 502：检查 `docker compose ps`、容器日志以及宿主机 `127.0.0.1:18084/health`。

@@ -10,8 +10,8 @@ services:
     env_file:
       - .env
     environment:
-      HOST: 0.0.0.0
-      PORT: 8081
+      HOST: ${HOST:-0.0.0.0}
+      PORT: ${PORT:-18084}
       DB_PATH: /app/data/extension.sqlite
       PUBLIC_DIR: /app/web/dist
     volumes:
