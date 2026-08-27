@@ -26,6 +26,8 @@ test('Sub2API 客户端分别使用 Bearer 和 x-api-key 并解包 data', async 
   }), { id: 7 });
   assert.deepEqual(await client.listGroups(), { id: 7 });
   assert.deepEqual(await client.updateUserAllowedGroups(7, [2, 5]), { id: 7 });
+  assert.deepEqual(await client.updateUserAllowedGroups(7, [2, 5], 3), { id: 7 });
+  assert.deepEqual(await client.updateUserConcurrency(7, 4), { id: 7 });
   assert.equal(requests[0].options.headers.Authorization, 'Bearer jwt-value');
   assert.equal(requests[0].options.headers['x-api-key'], undefined);
   assert.equal(requests[1].options.headers['x-api-key'], 'admin-secret');
@@ -44,6 +46,8 @@ test('Sub2API 客户端分别使用 Bearer 和 x-api-key 并解包 data', async 
   );
   assert.equal(requests[5].options.method, 'PUT');
   assert.deepEqual(JSON.parse(requests[5].options.body), { allowed_groups: [2, 5] });
+  assert.deepEqual(JSON.parse(requests[6].options.body), { allowed_groups: [2, 5], concurrency: 3 });
+  assert.deepEqual(JSON.parse(requests[7].options.body), { concurrency: 4 });
 });
 
 test('Sub2API 业务错误不会把上游响应内容直接泄露', async () => {

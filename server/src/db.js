@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { PostgresSyncDatabase } from './postgres-database.js';
 
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 
 export function openDatabase(path) {
   if (/^postgres(?:ql)?:\/\//i.test(path)) return new PostgresSyncDatabase(path);
@@ -513,6 +513,46 @@ function migrate(db) {
       PRAGMA user_version = 13;
       COMMIT;
     `);
+  }
+  if (current < 14) {
+    const hasColumn = (table, column) => Boolean(db.prepare(`
+      SELECT 1 FROM pragma_table_info(?) WHERE name = ?
+    `).get(table, column));
+    const hasTable = (table) => Boolean(db.prepare(`
+      SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?
+    `).get(table));
+    const statements = [];
+    if (!hasColumn('synced_users', 'concurrency')) {
+      statements.push('ALTER TABLE synced_users ADD COLUMN concurrency INTEGER NOT NULL DEFAULT 0;');
+    }
+    if (!hasColumn('group_entitlement_rules', 'concurrency_limit')) {
+      statements.push('ALTER TABLE group_entitlement_rules ADD COLUMN concurrency_limit INTEGER;');
+    }
+    if (!hasTable('group_entitlement_concurrency_overrides')) {
+      statements.push(`
+        CREATE TABLE group_entitlement_concurrency_overrides (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          rule_id INTEGER NOT NULL REFERENCES group_entitlement_rules(id) ON DELETE CASCADE,
+          group_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          original_concurrency INTEGER NOT NULL CHECK (original_concurrency >= 0),
+          applied_concurrency INTEGER NOT NULL CHECK (applied_concurrency >= 0),
+          status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'failed', 'restored')),
+          created_at TEXT NOT NULL,
+          applied_at TEXT,
+          restored_at TEXT,
+          last_error TEXT,
+          UNIQUE(rule_id, user_id)
+        ) STRICT;
+      `);
+    }
+    statements.push(`
+      CREATE INDEX IF NOT EXISTS concurrency_overrides_user_idx
+        ON group_entitlement_concurrency_overrides(user_id, status, id DESC);
+      CREATE INDEX IF NOT EXISTS concurrency_overrides_rule_idx
+        ON group_entitlement_concurrency_overrides(rule_id, status, user_id);
+    `);
+    db.exec(`BEGIN IMMEDIATE;${statements.join('\n')}\nPRAGMA user_version = 14; COMMIT;`);
   }
 }
 

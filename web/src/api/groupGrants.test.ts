@@ -30,6 +30,7 @@ function rule(overrides: Record<string, unknown> = {}): Record<string, unknown> 
     enabled: true,
     activity_ends_at: '2026-08-01T00:00:00.000Z',
     revoke_at: '2026-08-02T00:00:00.000Z',
+    concurrency_limit: 3,
     condition,
     managed_count: 3,
     preexisting_count: 2,
@@ -84,6 +85,7 @@ describe('group grant APIs', () => {
       group_id: 12,
       group_name: '狂欢分组',
       revoke_at: '2026-08-02T00:00:00.000Z',
+      concurrency_limit: 3,
       revoke_when_ineligible: true
     })
     expect(rules.items[0]?.last_execution).toMatchObject({
@@ -100,6 +102,7 @@ describe('group grant APIs', () => {
       group_id: 12,
       enabled: true,
       revoke_when_ineligible: false,
+      concurrency_limit: 3,
       condition
     }
 

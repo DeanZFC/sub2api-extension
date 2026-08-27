@@ -31,7 +31,7 @@ test('数据库升级会把旧抽奖迁移为未启动或进行中', () => {
         { name: '旧已发布抽奖', status: 'active' }
       ]
     );
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 14);
     db.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });

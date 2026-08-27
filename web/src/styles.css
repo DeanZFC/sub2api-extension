@@ -640,6 +640,12 @@ textarea.control {
   font-weight: 600;
 }
 
+.field-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .field--compact {
   width: 150px;
 }

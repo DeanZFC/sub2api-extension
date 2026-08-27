@@ -95,6 +95,8 @@ export interface GroupGrantRule {
   activity_starts_at?: string | null
   activity_ends_at?: string | null
   revoke_at?: string | null
+  /** 申请成功后临时设置的 Sub2API 并发数；为空表示不修改。 */
+  concurrency_limit?: number | null
   revoke_when_ineligible: boolean
   condition: ConditionNode
   last_execution?: GroupGrantExecution
@@ -113,6 +115,7 @@ export type GroupGrantRuleInput = Pick<
   | 'activity_starts_at'
   | 'activity_ends_at'
   | 'revoke_at'
+  | 'concurrency_limit'
   | 'condition'
 >
 

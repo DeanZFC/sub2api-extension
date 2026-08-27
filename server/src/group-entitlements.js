@@ -21,6 +21,7 @@ export class GroupEntitlementService {
     this.userLocks = new Map();
     this.expiryTimer = null;
     this.expiring = false;
+    this.scheduledRunning = false;
   }
 
   async groups(refresh = true) {
@@ -58,13 +59,14 @@ export class GroupEntitlementService {
         INSERT INTO group_entitlement_rules(
           name, group_id, enabled, revoke_when_ineligible, condition_json,
           assignment_mode, activity_description, activity_starts_at, activity_ends_at, revoke_at,
+          concurrency_limit,
           created_by, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         value.name, value.group_id, value.enabled ? 1 : 0,
         value.revoke_when_ineligible ? 1 : 0, JSON.stringify(value.condition),
         value.assignment_mode, value.activity_description, value.activity_starts_at, value.activity_ends_at,
-        value.revoke_at,
+        value.revoke_at, value.concurrency_limit,
         actorUserId, timestamp, timestamp
       );
       const ruleId = Number(result.lastInsertRowid);
@@ -92,11 +94,12 @@ export class GroupEntitlementService {
       this.db.prepare(`
         UPDATE group_entitlement_rules SET name = ?, enabled = ?, revoke_when_ineligible = ?,
           condition_json = ?, assignment_mode = ?, activity_description = ?,
-          activity_starts_at = ?, activity_ends_at = ?, revoke_at = ?, updated_at = ? WHERE id = ?
+          activity_starts_at = ?, activity_ends_at = ?, revoke_at = ?, concurrency_limit = ?,
+          updated_at = ? WHERE id = ?
       `).run(
         value.name, value.enabled ? 1 : 0, value.revoke_when_ineligible ? 1 : 0,
         JSON.stringify(value.condition), value.assignment_mode, value.activity_description,
-        value.activity_starts_at, value.activity_ends_at, value.revoke_at, nowIso(), id
+        value.activity_starts_at, value.activity_ends_at, value.revoke_at, value.concurrency_limit, nowIso(), id
       );
       audit(this.db, actorUserId, 'group_rule.updated', 'group_entitlement_rule', id, {
         group_id: existing.group_id,
@@ -176,10 +179,10 @@ export class GroupEntitlementService {
     if (this.expiryTimer) return;
     const interval = Number(this.config.groupExpiryIntervalMs) || 10_000;
     this.expiryTimer = setInterval(() => {
-      this.executeScheduled().catch(() => { /* unfinished revocations retry on the next interval */ });
+      this.runScheduledTasks().catch(() => { /* unfinished tasks retry on the next interval */ });
     }, interval);
     this.expiryTimer.unref?.();
-    setImmediate(() => this.executeScheduled().catch(() => {}));
+    setImmediate(() => this.runScheduledTasks().catch(() => {}));
   }
 
   stopExpiryRevocations() {
@@ -187,7 +190,101 @@ export class GroupEntitlementService {
     this.expiryTimer = null;
   }
 
-  async executeScheduled({ limit = 10 } = {}) {
+  async runScheduledTasks(options = {}) {
+    if (this.scheduledRunning) return [];
+    this.scheduledRunning = true;
+    try {
+      const restored = await this.restoreScheduledConcurrency(options);
+      const revoked = await this.executeScheduled(options);
+      return [...restored, ...revoked];
+    } finally {
+      this.scheduledRunning = false;
+    }
+  }
+
+  async restoreScheduledConcurrency({ limit = 100 } = {}) {
+    const now = nowIso();
+    const rows = this.db.prepare(`
+      SELECT o.id, o.rule_id, o.user_id, o.status,
+        COALESCE(r.activity_ends_at, r.revoke_at) AS restore_at
+      FROM group_entitlement_concurrency_overrides o
+      JOIN group_entitlement_rules r ON r.id = o.rule_id
+      WHERE r.assignment_mode = 'claim'
+        AND COALESCE(r.activity_ends_at, r.revoke_at) IS NOT NULL
+        AND COALESCE(r.activity_ends_at, r.revoke_at) <= ?
+        AND o.status IN ('active', 'pending', 'failed')
+      ORDER BY COALESCE(r.activity_ends_at, r.revoke_at) ASC, o.id ASC
+      LIMIT ?
+    `).all(now, Math.max(1, Math.min(500, Number(limit) || 100)));
+    const results = [];
+    for (const row of rows) {
+      try {
+        await this.#withUserLock(row.user_id, async () => {
+          const override = this.db.prepare(`
+            SELECT * FROM group_entitlement_concurrency_overrides
+            WHERE id = ? AND status IN ('active', 'pending', 'failed')
+          `).get(row.id);
+          if (!override) return;
+          const rule = this.#rawRule(row.rule_id);
+          let upstream;
+          try {
+            upstream = await this.client.getUser(row.user_id);
+          } catch (error) {
+            if (error?.upstreamStatus === 404) {
+              this.#markConcurrencyOverrideRestored(override.id);
+              results.push({ id: Number(override.id), status: 'restored', user_id: Number(row.user_id) });
+              return;
+            }
+            throw error;
+          }
+          upsertSyncedUser(this.db, upstream);
+          const user = this.db.prepare('SELECT * FROM synced_users WHERE user_id = ?').get(row.user_id);
+          if (!user) throw notFound('用户');
+          const restore = this.#concurrencyRestore(rule, row.user_id);
+          if (!restore) return;
+          if (Number(user.concurrency) !== restore.concurrency) {
+            const updated = await this.client.updateUserConcurrency(row.user_id, restore.concurrency);
+            this.#storeUpdatedUser(user, updated, normalizeAllowedGroups(parseJson(user.allowed_groups_json, [])), restore.concurrency);
+          }
+          this.#markConcurrencyOverrideRestored(restore.id);
+          results.push({
+            id: Number(restore.id),
+            rule_id: Number(row.rule_id),
+            user_id: Number(row.user_id),
+            status: 'restored',
+            concurrency: restore.concurrency
+          });
+          audit(this.db, null, 'group_concurrency.restored', 'user', row.user_id, {
+            rule_id: row.rule_id,
+            restored_concurrency: restore.concurrency,
+            restore_at: row.restore_at
+          });
+        });
+      } catch (error) {
+        this.#markConcurrencyOverrideFailed(row.id, error);
+        results.push({
+          id: Number(row.id),
+          rule_id: Number(row.rule_id),
+          user_id: Number(row.user_id),
+          status: 'failed',
+          error: String(error?.message || '并发恢复失败')
+        });
+        audit(this.db, null, 'group_concurrency.restore_failed', 'user', row.user_id, {
+          rule_id: row.rule_id,
+          restore_at: row.restore_at,
+          code: String(error?.code || 'GROUP_CONCURRENCY_RESTORE_FAILED'),
+          message: String(error?.message || '并发恢复失败').slice(0, 500)
+        });
+      }
+    }
+    return results;
+  }
+
+  async executeScheduled(options = {}) {
+    return this.#executeScheduledRevocations(options);
+  }
+
+  async #executeScheduledRevocations({ limit = 10 } = {}) {
     if (this.expiring) return [];
     this.expiring = true;
     const results = [];
@@ -435,26 +532,65 @@ export class GroupEntitlementService {
     const timestamp = nowIso();
     if (decision.action === 'grant') {
       const next = unionGroups(decision.allowed_groups, rule.group_id);
-      const updated = await this.client.updateUserAllowedGroups(user.user_id, next);
-      this.#storeUpdatedAllowedGroups(user, updated, next);
+      const override = this.#prepareConcurrencyOverride(rule, user.user_id, user.concurrency);
+      let updated;
+      try {
+        updated = await this.client.updateUserAllowedGroups(
+          user.user_id,
+          next,
+          override?.applied_concurrency
+        );
+      } catch (error) {
+        if (override) this.#markConcurrencyOverrideFailed(override.id, error);
+        throw error;
+      }
+      this.#storeUpdatedUser(user, updated, next, override?.applied_concurrency);
+      if (override) this.#markConcurrencyOverrideApplied(override.id);
       // Only claim managed ownership after Sub2API confirms the write. If the
       // process dies between those steps, the next run treats the grant as
       // preexisting, which favors never revoking a permission of uncertain origin.
       this.#upsertMembership(rule, user.user_id, 'managed', 'active', 'granted', timestamp);
       summary.grant_count += 1;
-      audit(this.db, actorUserId, 'group_membership.granted', 'user', user.user_id, { group_id: rule.group_id });
+      audit(this.db, actorUserId, 'group_membership.granted', 'user', user.user_id, {
+        group_id: rule.group_id,
+        concurrency_limit: rule.concurrency_limit ?? null
+      });
       return;
     }
     if (decision.action === 'revoke_managed') {
       const next = differenceGroup(decision.allowed_groups, rule.group_id);
-      const updated = await this.client.updateUserAllowedGroups(user.user_id, next);
-      this.#storeUpdatedAllowedGroups(user, updated, next);
+      const restore = this.#concurrencyRestore(rule, user.user_id);
+      let updated;
+      try {
+        updated = await this.client.updateUserAllowedGroups(user.user_id, next, restore?.concurrency);
+      } catch (error) {
+        if (restore) this.#markConcurrencyOverrideFailed(restore.id, error);
+        throw error;
+      }
+      this.#storeUpdatedUser(user, updated, next, restore?.concurrency);
+      if (restore) this.#markConcurrencyOverrideRestored(restore.id);
       this.#upsertMembership(rule, user.user_id, 'managed', 'revoked', 'revoked', timestamp);
       summary.revoke_count += 1;
-      audit(this.db, actorUserId, 'group_membership.revoked', 'user', user.user_id, { group_id: rule.group_id });
+      audit(this.db, actorUserId, 'group_membership.revoked', 'user', user.user_id, {
+        group_id: rule.group_id,
+        restored_concurrency: restore?.concurrency ?? null
+      });
       return;
     }
     if (decision.action === 'keep_managed') {
+      const override = this.#prepareConcurrencyOverride(rule, user.user_id, user.concurrency);
+      if (override && Number(user.concurrency) !== override.applied_concurrency) {
+        try {
+          const updated = await this.client.updateUserConcurrency(user.user_id, override.applied_concurrency);
+          this.#storeUpdatedUser(user, updated, decision.allowed_groups, override.applied_concurrency);
+          this.#markConcurrencyOverrideApplied(override.id);
+        } catch (error) {
+          this.#markConcurrencyOverrideFailed(override.id, error);
+          throw error;
+        }
+      } else if (override) {
+        this.#markConcurrencyOverrideApplied(override.id);
+      }
       this.#upsertMembership(rule, user.user_id, 'managed', 'active', 'retained', timestamp);
       summary.managed_count += 1;
       return;
@@ -465,6 +601,17 @@ export class GroupEntitlementService {
       return;
     }
     if (membership?.status === 'active' && !decision.has_group) {
+      const restore = this.#concurrencyRestore(rule, user.user_id);
+      if (restore) {
+        try {
+          const updated = await this.client.updateUserConcurrency(user.user_id, restore.concurrency);
+          this.#storeUpdatedUser(user, updated, decision.allowed_groups, restore.concurrency);
+          this.#markConcurrencyOverrideRestored(restore.id);
+        } catch (error) {
+          this.#markConcurrencyOverrideFailed(restore.id, error);
+          throw error;
+        }
+      }
       this.#upsertMembership(rule, user.user_id, membership.ownership, 'revoked', 'missing_upstream', timestamp);
     }
     summary.unchanged_count += 1;
@@ -538,13 +685,107 @@ export class GroupEntitlementService {
     `).get(groupId, userId);
   }
 
-  #storeUpdatedAllowedGroups(user, updated, allowedGroups) {
-    const confirmedGroups = updated && Number(updated.id) === Number(user.user_id)
+  #storeUpdatedUser(user, updated, allowedGroups, fallbackConcurrency = undefined) {
+    const hasUpdatedUser = updated && Number(updated.id) === Number(user.user_id);
+    const confirmedGroups = hasUpdatedUser && Array.isArray(updated.allowed_groups)
       ? normalizeAllowedGroups(updated.allowed_groups)
       : normalizeAllowedGroups(allowedGroups);
+    const confirmedConcurrency = hasUpdatedUser && Number.isSafeInteger(Number(updated.concurrency))
+      ? Number(updated.concurrency)
+      : (fallbackConcurrency === undefined ? Number(user.concurrency) || 0 : Number(fallbackConcurrency));
     this.db.prepare(`
-      UPDATE synced_users SET allowed_groups_json = ?, synced_at = ? WHERE user_id = ?
-    `).run(JSON.stringify(confirmedGroups), nowIso(), user.user_id);
+      UPDATE synced_users SET allowed_groups_json = ?, concurrency = ?, synced_at = ? WHERE user_id = ?
+    `).run(JSON.stringify(confirmedGroups), confirmedConcurrency, nowIso(), user.user_id);
+  }
+
+  #prepareConcurrencyOverride(rule, userId, currentConcurrency) {
+    if (rule.concurrency_limit === null || rule.concurrency_limit === undefined) return null;
+    const appliedConcurrency = Number(rule.concurrency_limit);
+    if (!Number.isSafeInteger(appliedConcurrency) || appliedConcurrency < 1) return null;
+    const existing = this.db.prepare(`
+      SELECT * FROM group_entitlement_concurrency_overrides
+      WHERE rule_id = ? AND user_id = ?
+    `).get(rule.id, userId);
+    const originalConcurrency = existing && ['active', 'pending', 'failed'].includes(existing.status)
+      ? Number(existing.original_concurrency)
+      : Number(currentConcurrency) || 0;
+    const createdAt = nowIso();
+    const id = this.db.prepare(`
+      INSERT INTO group_entitlement_concurrency_overrides(
+        rule_id, group_id, user_id, original_concurrency, applied_concurrency, status, created_at
+      ) VALUES (?, ?, ?, ?, ?, 'pending', ?)
+      ON CONFLICT(rule_id, user_id) DO UPDATE SET
+        group_id = excluded.group_id,
+        original_concurrency = excluded.original_concurrency,
+        applied_concurrency = excluded.applied_concurrency,
+        status = 'pending',
+        applied_at = NULL,
+        restored_at = NULL,
+        last_error = NULL
+      RETURNING id
+    `).run(
+      rule.id, rule.group_id, userId, originalConcurrency, appliedConcurrency, createdAt
+    ).lastInsertRowid;
+    return {
+      id: Number(id),
+      original_concurrency: originalConcurrency,
+      applied_concurrency: appliedConcurrency
+    };
+  }
+
+  #markConcurrencyOverrideApplied(id) {
+    this.db.prepare(`
+      UPDATE group_entitlement_concurrency_overrides
+      SET status = 'active', applied_at = COALESCE(applied_at, ?), last_error = NULL
+      WHERE id = ?
+    `).run(nowIso(), id);
+  }
+
+  #markConcurrencyOverrideFailed(id, error) {
+    this.db.prepare(`
+      UPDATE group_entitlement_concurrency_overrides
+      SET status = 'failed', last_error = ?
+      WHERE id = ?
+    `).run(String(error?.message || error?.code || '并发数更新失败').slice(0, 500), id);
+  }
+
+  #markConcurrencyOverrideRestored(id) {
+    this.db.prepare(`
+      UPDATE group_entitlement_concurrency_overrides
+      SET status = 'restored', restored_at = ?, last_error = NULL
+      WHERE id = ?
+    `).run(nowIso(), id);
+  }
+
+  #concurrencyRestore(rule, userId) {
+    const override = this.db.prepare(`
+      SELECT * FROM group_entitlement_concurrency_overrides
+      WHERE rule_id = ? AND user_id = ? AND status IN ('active', 'pending', 'failed')
+    `).get(rule.id, userId);
+    if (!override) return null;
+    const others = this.db.prepare(`
+      SELECT o.id, o.original_concurrency, o.applied_concurrency
+      FROM group_entitlement_concurrency_overrides o
+      WHERE o.user_id = ? AND o.id <> ? AND o.status IN ('active', 'pending', 'failed')
+      ORDER BY o.id ASC
+    `).all(userId, override.id);
+    // Treat overrides as a stack. The earliest remaining row owns the baseline
+    // from before the overlapping activities; carry it to the newest row so
+    // restoring activities in any end-time order still reaches that baseline.
+    const other = others.at(-1);
+    const baseline = others.length && Number(others[0].id) < Number(override.id)
+      ? Number(others[0].original_concurrency)
+      : Number(override.original_concurrency);
+    if (other && Number(other.original_concurrency) !== baseline) {
+      this.db.prepare(`
+        UPDATE group_entitlement_concurrency_overrides
+        SET original_concurrency = ? WHERE id = ?
+      `).run(baseline, other.id);
+    }
+    return {
+      id: Number(override.id),
+      concurrency: other ? Number(other.applied_concurrency) : baseline
+    };
   }
 
   async #withUserLock(userId, callback) {
@@ -648,6 +889,9 @@ export class GroupEntitlementService {
       activity_starts_at: row.activity_starts_at || null,
       activity_ends_at: row.activity_ends_at || null,
       revoke_at: row.revoke_at || null,
+      concurrency_limit: row.concurrency_limit === null || row.concurrency_limit === undefined
+        ? null
+        : Number(row.concurrency_limit),
       revoke_when_ineligible: Boolean(row.revoke_when_ineligible),
       condition: conditionToApi(parseJson(row.condition_json)),
       managed_count: Number(row.managed_count || 0),
@@ -684,6 +928,9 @@ function normalizeRuleInput(input, existing = null) {
     body.revoke_at === undefined ? existing?.revoke_at : body.revoke_at,
     'revoke_at'
   );
+  const concurrencyLimit = normalizeOptionalConcurrency(
+    body.concurrency_limit === undefined ? existing?.concurrency_limit : body.concurrency_limit
+  );
   if (activityStartsAt && activityEndsAt && activityStartsAt >= activityEndsAt) {
     throw badRequest('VALIDATION_ERROR', '活动结束时间必须晚于开始时间');
   }
@@ -707,8 +954,18 @@ function normalizeRuleInput(input, existing = null) {
     activity_starts_at: activityStartsAt,
     activity_ends_at: activityEndsAt,
     revoke_at: revokeAt,
+    concurrency_limit: concurrencyLimit,
     condition: conditionFromApi(body.condition)
   };
+}
+
+function normalizeOptionalConcurrency(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 100_000) {
+    throw badRequest('VALIDATION_ERROR', 'concurrency_limit必须是 1 至 100000 之间的整数');
+  }
+  return parsed;
 }
 
 function normalizeOptionalDate(value, field) {

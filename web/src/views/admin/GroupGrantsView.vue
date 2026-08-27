@@ -62,6 +62,7 @@ const form = reactive<GroupGrantRuleInput>({
   activity_starts_at: null,
   activity_ends_at: null,
   revoke_at: null,
+  concurrency_limit: null,
   condition: createConditionGroup()
 })
 
@@ -116,6 +117,7 @@ function resetForm(): void {
     activity_starts_at: null,
     activity_ends_at: null,
     revoke_at: null,
+    concurrency_limit: null,
     condition: createConditionGroup()
   })
 }
@@ -142,6 +144,7 @@ function openEdit(rule: GroupGrantRule): void {
     activity_starts_at: toLocalDateTime(rule.activity_starts_at),
     activity_ends_at: toLocalDateTime(rule.activity_ends_at),
     revoke_at: toLocalDateTime(rule.revoke_at),
+    concurrency_limit: rule.concurrency_limit ?? null,
     condition: normalizeCondition(rule.condition)
   })
   editorOpen.value = true
@@ -170,6 +173,7 @@ function inputFromRule(rule: GroupGrantRule, enabled = rule.enabled): GroupGrant
     activity_starts_at: rule.activity_starts_at ?? null,
     activity_ends_at: rule.activity_ends_at ?? null,
     revoke_at: rule.revoke_at ?? null,
+    concurrency_limit: rule.concurrency_limit ?? null,
     condition: rule.condition
   }
 }
@@ -196,6 +200,14 @@ async function save(): Promise<void> {
     notices.show('分组撤销时间必须晚于活动结束时间', 'error')
     return
   }
+  if (
+    form.concurrency_limit !== null &&
+    form.concurrency_limit !== undefined &&
+    (!Number.isInteger(form.concurrency_limit) || form.concurrency_limit < 1 || form.concurrency_limit > 100000)
+  ) {
+    notices.show('申请后并发数必须是 1 至 100000 之间的整数，留空表示不修改', 'error')
+    return
+  }
   saving.value = true
   const payload: GroupGrantRuleInput = {
     name: form.name.trim(),
@@ -207,6 +219,10 @@ async function save(): Promise<void> {
     activity_starts_at: fromActivityDateTimeInput(form.activity_starts_at),
     activity_ends_at: fromActivityDateTimeInput(form.activity_ends_at),
     revoke_at: fromActivityDateTimeInput(form.revoke_at),
+    concurrency_limit:
+      form.concurrency_limit === null || form.concurrency_limit === undefined
+        ? null
+        : Number(form.concurrency_limit),
     condition: normalizeCondition(form.condition)
   }
   try {
@@ -391,6 +407,7 @@ onBeforeUnmount(() => {
               <td>
                 <strong>{{ groupName(rule) }}</strong>
                 <small>{{ groups.find((group) => group.id === rule.group_id)?.exclusive ? '专属分组' : '普通分组' }}</small>
+                <small v-if="rule.concurrency_limit">申请后并发 {{ rule.concurrency_limit }}</small>
               </td>
               <td class="condition-cell"><ConditionSummary :condition="rule.condition" /></td>
               <td>
@@ -469,6 +486,19 @@ onBeforeUnmount(() => {
           <label class="field">
             <span>活动说明</span>
             <textarea v-model="form.activity_description" class="control" rows="2" maxlength="500" placeholder="例如：充值用户可申请狂欢分组资格" />
+          </label>
+          <label class="field">
+            <span>申请后用户并发数（可选）</span>
+            <input
+              v-model.number="form.concurrency_limit"
+              class="control"
+              type="number"
+              min="1"
+              max="100000"
+              step="1"
+              placeholder="留空表示不修改"
+            />
+            <small class="field-hint">用户申请成功后临时设置；活动结束或提前撤销时恢复申请前的并发数。</small>
           </label>
           <div class="form-grid lifecycle-time-grid">
             <label class="field">

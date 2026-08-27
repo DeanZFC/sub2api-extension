@@ -1,6 +1,6 @@
 # 生产部署
 
-本部署方案适用于以下结构：Sub2API 和 PostgreSQL 已在应用服务器宿主机运行，扩展在该服务器使用 Docker，Nginx 位于另一台服务器。扩展只与 Sub2API 共用 PostgreSQL 实例，不共用数据库和数据库账号。文中的域名、IP、数据库账号和数据库名均为占位示例，部署前必须替换。
+本部署方案适用于以下结构：Sub2API 已在应用服务器运行，扩展在该服务器使用 Docker，Nginx 位于另一台服务器。扩展默认使用 Docker 命名卷中的 SQLite，不需要连接 Sub2API 的 PostgreSQL；如需多实例共享扩展数据，再配置独立 PostgreSQL 数据库。文中的域名、IP、数据库账号和数据库名均为占位示例，部署前必须替换。
 
 ## 1. 克隆代码
 
@@ -27,7 +27,9 @@ docker compose version
 systemctl enable --now docker
 ```
 
-## 2. 创建扩展数据库和用户
+## 2. （可选）创建独立 PostgreSQL 数据库和用户
+
+默认 SQLite 部署可跳过本节。只有在需要多实例共享扩展数据时，才创建独立数据库；不能使用 Sub2API 业务库。
 
 不要让扩展使用 PostgreSQL 超级用户，也不要把表建进现有 Sub2API 数据库。先生成一个只含十六进制字符的随机密码，记录到安全的密码管理器中：
 
@@ -73,7 +75,7 @@ sudo -u postgres psql -c "select datname, pg_catalog.pg_get_userbyid(datdba) as 
 dig +short extension.example.com
 ```
 
-再次确认扩展数据库和账号可以在宿主机登录。执行时会交互询问密码，不要把密码直接写进 shell 历史：
+如果选择 PostgreSQL，再确认扩展数据库和账号可以在宿主机登录。SQLite 部署无需执行数据库连接检查：
 
 ```bash
 psql -h 127.0.0.1 -U sub2api_extension_user -d sub2api_extension \
@@ -91,12 +93,20 @@ chmod 600 .env
 openssl rand -hex 32
 ```
 
-编辑 `.env`，必须替换以下三项：
+编辑 `.env`，必须替换以下两项。默认不填写 `DATABASE_URL`，扩展使用 SQLite。如果这是从旧版 PostgreSQL 部署升级，请删除 `.env` 中已有的 `DATABASE_URL=` 行，否则它会继续优先使用 PostgreSQL：
 
 ```dotenv
 SUB2API_ADMIN_API_KEY=新创建的管理员APIKey
 SESSION_SECRET=刚刚生成的随机值
-DATABASE_URL=postgresql://sub2api_extension_user:数据库密码@127.0.0.1:5432/sub2api_extension
+# 只有多实例共享数据时才取消注释，并使用独立数据库。
+# DATABASE_URL=postgresql://sub2api_extension_user:数据库密码@127.0.0.1:5432/sub2api_extension
+```
+
+也可以执行下面的命令删除旧连接配置，再打开 `.env` 确认：
+
+```bash
+sed -i '/^DATABASE_URL=/d' .env
+grep -nE '^(DATABASE_URL|DB_PATH)=' .env || true
 ```
 
 同时根据新的 Sub2API 和扩展域名检查以下配置。管理员 API Key 必须在这套新的 Sub2API
@@ -117,32 +127,30 @@ ACTIVITY_TIME_ZONE=Asia/Shanghai
 
 数据库密码如果含有 `@`、`:`、`/`、`?`、`#`、`%` 等字符，必须先做 URL 编码。不要再次使用曾粘贴到聊天、截图或日志里的旧数据库密码和管理员 API Key。
 
-## 5. 构建、初始化并启动
+## 5. 构建并启动
 
-生产 Compose 使用 Linux 的 host 网络。容器因此可以通过 `127.0.0.1:5432` 访问同一台应用服务器上的 PostgreSQL。扩展监听应用服务器的 `0.0.0.0:8081`，供另一台 Nginx 服务器反向代理。
+生产 Compose 使用 Linux 的 host 网络。扩展监听应用服务器的 `0.0.0.0:8081`，供另一台 Nginx 服务器反向代理。默认数据库文件位于命名卷 `sub2api-extension-data`；如果 `.env` 设置了 `DATABASE_URL`，才会使用独立 PostgreSQL。
 
 ```bash
 cd /opt/sub2api-extension
 docker compose config
 docker compose build
-docker compose run --rm extension npm run db:setup
-docker compose run --rm extension npm run db:verify
 docker compose up -d
 docker compose ps
 docker compose logs --tail=200 extension
 curl --fail http://127.0.0.1:8081/health
 ```
 
-`db:setup` 是幂等操作：数据库已存在时不会重建，只会初始化或升级扩展表结构。健康检查成功后应返回 HTTP 200。
+SQLite 会在服务启动时自动创建和升级表结构。使用 PostgreSQL 时，服务启动也会自动执行幂等迁移。健康检查成功后应返回 HTTP 200。
 
-确保 PostgreSQL 和 Docker 都设置为开机启动：
+确保 Docker 设置为开机启动；只有选择 PostgreSQL 时才需要同时启用 PostgreSQL：
 
 ```bash
-systemctl enable postgresql
 systemctl enable docker
+# 仅 PostgreSQL 模式执行：systemctl enable postgresql
 ```
 
-服务器重启后若入口和调用日志同时报错，而 PostgreSQL 手动连接正常，说明扩展持有的旧连接已失效，可重新建立连接：
+服务器重启后若入口和调用日志同时报错，可先检查 Docker 容器和健康检查；SQLite 模式直接重启扩展容器即可：
 
 ```bash
 docker compose restart extension
@@ -224,4 +232,4 @@ docker compose restart extension
 curl --fail http://127.0.0.1:8081/health
 ```
 
-不要执行 `docker-compose down -v`。扩展业务数据虽然位于 PostgreSQL，但仍应对 `sub2api_extension` 独立数据库配置定期 `pg_dump` 备份。
+不要执行 `docker-compose down -v`，否则会删除 SQLite 命名卷。SQLite 部署应按 README 的备份步骤复制数据库文件；PostgreSQL 部署仍应对 `sub2api_extension` 独立数据库配置定期 `pg_dump` 备份。

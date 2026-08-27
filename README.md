@@ -1,16 +1,16 @@
 # Sub2API 活动扩展
 
-这是一个独立于 Sub2API 部署的活动服务，不修改 Sub2API 源码，也不读取或写入 Sub2API 业务库。它通过 Sub2API API 校验用户身份，并在用户参与时实时读取当前用户数据。扩展业务数据可以保存在同一 PostgreSQL 实例的独立数据库中，也可以在本地使用 SQLite，提供以下能力：
+这是一个独立于 Sub2API 部署的活动服务，不修改 Sub2API 源码，也不读取或写入 Sub2API 业务库。它通过 Sub2API API 校验用户身份，并在用户参与时实时读取当前用户数据。扩展默认使用持久化 SQLite；也保留使用独立 PostgreSQL 数据库的可选兼容模式，提供以下能力：
 
 - 管理员创建并启动抽奖，用户点击“参与抽奖”并实时通过“当前余额”“累计充值金额”“最近 N 天累计充值金额”等 `AND`、`OR` 组合条件后才会进入参与池。
 - 管理员创建每日签到活动，可配置参与条件、开放时间和可选余额奖励；用户详情页按月历展示本月签到日期。
-- 管理员为 Sub2API 真实专属分组配置资格活动；只有用户手动申请并满足累计充值金额、当前余额或组合条件后，才会安全追加目标分组。活动结束后对用户隐藏，到达单独配置的分组撤销时间后再自动撤销本活动发放的授权。
+- 管理员为 Sub2API 真实专属分组配置资格活动；只有用户手动申请并满足累计充值金额、当前余额或组合条件后，才会安全追加目标分组。可选配置申请后的临时并发数，系统会记录申请前数值，活动结束时恢复并发，到达单独配置的分组撤销时间后再自动撤销本活动发放的授权。
 - 管理员只从已主动参与且参与时校验通过的用户中锁定名单、随机无放回开奖；可配置定时自动开奖，也可随时手动开奖。
 - 奖品支持 Sub2API 可向现有用户自动兑换的余额、并发额度、订阅，以及需要管理员确认的实体或其他人工奖品。
 
 ## 累计充值金额的数据来源
 
-扩展使用自己的独立数据库保存抽奖参与记录、分组资格规则、扩展自己授予的分组成员记录、参与时资格快照、开奖结果、发奖任务、会话和审计记录。生产环境推荐在 Sub2API 的 PostgreSQL 实例中新建 `sub2api_extension` 数据库，本地开发也可以继续使用 SQLite。用户点击参与、签到或申请分组时，扩展只实时查询该用户的 Sub2API 数据；它不会访问任何外部支付平台。
+扩展使用自己的 SQLite 数据库保存抽奖参与记录、分组资格规则、扩展自己授予的分组成员记录、并发覆盖记录、参与时资格快照、开奖结果、发奖任务、会话和审计记录。用户点击参与、签到或申请分组时，扩展只实时查询该用户的 Sub2API 数据；它不会访问任何外部支付平台。需要多实例部署时，可以通过 `DATABASE_URL` 切换到独立 PostgreSQL 数据库，但不能使用 Sub2API 业务库。
 
 “累计充值金额”在用户参与时同时实时读取 Sub2API 用户详情和该用户的
 `/admin/users/:id/balance-history` 累计值，并取两者中的较大值。这样既能覆盖支付后写入用户累计值的直接充值，也能覆盖以下正数记录：
@@ -27,7 +27,7 @@
 1. 先在 Sub2API 后台创建或编辑目标分组，例如默认倍率 `0.01x` 的“狂欢分组”。
 2. 必须将目标分组设为“专属分组”并保持启用；公开分组默认对所有用户可用，无法实现“只给部分人”。
 3. 进入扩展的“分组资格”页面，选择该分组，配置“累计充值金额”、“当前余额”或 `AND`/`OR` 组合条件。
-4. 资格活动会显示在用户活动中心。系统不会扫描存量或增量用户，只有用户点击申请时才实时检查当前条件并加入分组；不满足时会显示具体原因。到达活动结束时间后，活动对用户隐藏且停止申请；到达更晚的分组撤销时间后，后台才撤销本活动发放的授权。
+4. 资格活动会显示在用户活动中心。系统不会扫描存量或增量用户，只有用户点击申请时才实时检查当前条件并加入分组；不满足时会显示具体原因。若配置了临时并发数，活动结束时会恢复每个用户申请前的并发数；到达更晚的分组撤销时间后，后台才撤销本活动发放的授权。
 
 每个 Sub2API 分组最多只能有一条授权规则。扩展写回用户时只更新 `allowed_groups`：它会先重新读取用户最新分组，做并集后再写回，不会覆盖用户的其他分组，也不会修改图中的“专属倍率”（`group_rates`）。
 
@@ -59,7 +59,7 @@ cp .env.example .env
 openssl rand -hex 32
 ```
 
-编辑 `.env`，至少替换以下值：
+编辑 `.env`，至少替换以下值。默认不填写 `DATABASE_URL`，活动数据会写入 Docker 命名卷中的 SQLite：
 
 ```dotenv
 SUB2API_BASE_URL=https://ai.example.com
@@ -67,19 +67,17 @@ SUB2API_ADMIN_API_KEY=replace-with-your-admin-api-key
 SESSION_SECRET=replace-with-the-generated-random-value
 FRAME_ANCESTORS=https://ai.example.com
 ACTIVITY_TIME_ZONE=Asia/Shanghai
-# 推荐使用同一 PostgreSQL 实例中的独立数据库，不要填写现有 Sub2API 业务库。
-DATABASE_URL=postgresql://extension_user:password@postgres.example.com:5432/sub2api_extension?sslmode=require
+# 默认使用 SQLite；只有需要独立 PostgreSQL 时才取消下一行注释。
+# DATABASE_URL=postgresql://extension_user:password@postgres.example.com:5432/sub2api_extension?sslmode=require
 ```
 
 `ACTIVITY_TIME_ZONE` 同时控制页面时间显示、管理端活动时间输入和每日签到日期。数据库仍以 UTC
 保存时间，不需要在 `DATABASE_URL` 中追加时区参数，也不受数据库服务器所在国家影响。
 
-首次使用 PostgreSQL 时，先按 [`deploy/PRODUCTION.md`](deploy/PRODUCTION.md) 创建独立的低权限
-数据库用户和数据库，再构建镜像并执行幂等初始化脚本。数据库已经存在时，该脚本只初始化或升级扩展表：
+SQLite 会在服务启动时自动创建和升级表结构，不需要执行数据库初始化脚本：
 
 ```bash
 docker compose build
-docker compose run --rm extension npm run db:setup
 ```
 
 然后校验配置并启动：
@@ -91,7 +89,7 @@ docker compose ps
 docker compose logs -f extension
 ```
 
-默认只监听宿主机 `127.0.0.1:8081`。设置 `DATABASE_URL` 时活动数据保存在 PostgreSQL；不设置时使用命名卷 `sub2api-extension-data` 中的 SQLite。健康检查地址为 `http://127.0.0.1:8081/health`。
+默认监听 `0.0.0.0:8081` 供反向代理回源。设置 `DATABASE_URL` 时活动数据保存在独立 PostgreSQL；不设置时使用命名卷 `sub2api-extension-data` 中的 SQLite。健康检查地址为 `http://127.0.0.1:8081/health`。
 
 ```bash
 curl --fail http://127.0.0.1:8081/health

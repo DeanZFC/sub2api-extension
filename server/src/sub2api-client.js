@@ -44,11 +44,21 @@ export class Sub2ApiClient {
     });
   }
 
-  async updateUserAllowedGroups(userId, allowedGroups) {
+  async updateUserAllowedGroups(userId, allowedGroups, concurrency = undefined) {
+    const body = { allowed_groups: allowedGroups };
+    if (concurrency !== undefined) body.concurrency = Number(concurrency);
     return this.request(`/admin/users/${encodeURIComponent(String(userId))}`, {
       admin: true,
       method: 'PUT',
-      body: { allowed_groups: allowedGroups }
+      body
+    });
+  }
+
+  async updateUserConcurrency(userId, concurrency) {
+    return this.request(`/admin/users/${encodeURIComponent(String(userId))}`, {
+      admin: true,
+      method: 'PUT',
+      body: { concurrency: Number(concurrency) }
     });
   }
 

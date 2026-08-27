@@ -33,6 +33,7 @@ export function normalizeUpstreamUser(user, syncedAt = nowIso(), balanceHistoryT
     total_recharged_cents: BigInt(historyTotalRecharged) > BigInt(userTotalRecharged)
       ? historyTotalRecharged
       : userTotalRecharged,
+    concurrency: normalizeConcurrency(user.concurrency),
     allowed_groups_json: JSON.stringify(normalizeAllowedGroups(user.allowed_groups)),
     created_at: validDateOrNow(user.created_at, syncedAt),
     upstream_updated_at: user.updated_at ? validDateOrNull(user.updated_at) : null,
@@ -55,8 +56,8 @@ export function upsertSyncedUser(db, upstreamUser, syncedAt = nowIso(), balanceH
   db.prepare(`
     INSERT INTO synced_users(
       user_id, email, username, role, status, balance_cents, total_recharged_cents,
-      allowed_groups_json, created_at, upstream_updated_at, synced_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      concurrency, allowed_groups_json, created_at, upstream_updated_at, synced_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(user_id) DO UPDATE SET
       email = excluded.email,
       username = excluded.username,
@@ -64,13 +65,15 @@ export function upsertSyncedUser(db, upstreamUser, syncedAt = nowIso(), balanceH
       status = excluded.status,
       balance_cents = excluded.balance_cents,
       total_recharged_cents = excluded.total_recharged_cents,
+      concurrency = excluded.concurrency,
       allowed_groups_json = excluded.allowed_groups_json,
       created_at = excluded.created_at,
       upstream_updated_at = excluded.upstream_updated_at,
       synced_at = excluded.synced_at
   `).run(
     user.user_id, user.email, user.username, user.role, user.status, user.balance_cents,
-    user.total_recharged_cents, user.allowed_groups_json, user.created_at, user.upstream_updated_at, user.synced_at
+    user.total_recharged_cents, user.concurrency, user.allowed_groups_json, user.created_at,
+    user.upstream_updated_at, user.synced_at
   );
   return true;
 }
@@ -459,4 +462,9 @@ export class SyncService {
 function normalizeRateMultiplier(value) {
   const multiplier = Number(value);
   return Number.isFinite(multiplier) && multiplier > 0 ? multiplier : 1;
+}
+
+function normalizeConcurrency(value) {
+  const concurrency = Number(value);
+  return Number.isSafeInteger(concurrency) && concurrency >= 0 ? concurrency : 0;
 }

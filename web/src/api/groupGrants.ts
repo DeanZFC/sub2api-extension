@@ -148,6 +148,10 @@ export function normalizeGroupGrantRule(value: unknown): GroupGrantRule {
     activity_starts_at: stringValue(source.activity_starts_at) || null,
     activity_ends_at: stringValue(source.activity_ends_at) || null,
     revoke_at: stringValue(source.revoke_at) || null,
+    concurrency_limit:
+      source.concurrency_limit === undefined || source.concurrency_limit === null || source.concurrency_limit === ''
+        ? null
+        : numberValue(source.concurrency_limit),
     revoke_when_ineligible:
       source.revoke_when_ineligible === undefined
         ? true

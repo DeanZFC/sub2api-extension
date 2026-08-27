@@ -58,6 +58,101 @@ test('用户申请时只实时查询当前用户并安全追加分组', async (t
   assert.equal(fixture.updates.length, 1, '重复申请不能重复写回 Sub2API');
 });
 
+test('活动结束时恢复申请前并发数，但在撤销时间前保留分组', async (t) => {
+  const fixture = createFixture();
+  t.after(() => fixture.db.close());
+  fixture.users.get(1).concurrency = 7;
+  const rule = await fixture.service.createRule({
+    ...ruleInput(5),
+    concurrency_limit: 3,
+    activity_ends_at: '2098-01-01T00:00:00.000Z',
+    revoke_at: '2099-01-01T00:00:00.000Z'
+  }, 99);
+
+  await fixture.service.claim(rule.id, 1);
+  assert.equal(fixture.users.get(1).concurrency, 3);
+  assert.deepEqual({ ...fixture.db.prepare(`
+    SELECT original_concurrency, applied_concurrency, status
+    FROM group_entitlement_concurrency_overrides
+  `).get() }, { original_concurrency: 7, applied_concurrency: 3, status: 'active' });
+
+  await fixture.service.updateRule(rule.id, {
+    ...ruleInput(5),
+    concurrency_limit: 3,
+    activity_ends_at: '2019-01-01T00:00:00.000Z',
+    revoke_at: '2099-01-01T00:00:00.000Z'
+  }, 99);
+  const [restored] = await fixture.service.restoreScheduledConcurrency();
+  assert.equal(restored.status, 'restored');
+  assert.equal(fixture.users.get(1).concurrency, 7);
+  assert.deepEqual(fixture.users.get(1).allowed_groups, [5, 9]);
+  assert.equal(fixture.db.prepare('SELECT status FROM group_entitlement_concurrency_overrides').get().status, 'restored');
+  assert.deepEqual(await fixture.service.executeScheduled(), []);
+});
+
+test('多个重叠资格活动按结束顺序变化时仍恢复最初并发数', async (t) => {
+  const fixture = createFixture([5, 6]);
+  t.after(() => fixture.db.close());
+  fixture.users.get(1).concurrency = 7;
+  const first = await fixture.service.createRule({
+    ...ruleInput(5),
+    concurrency_limit: 3,
+    activity_ends_at: '2099-01-01T00:00:00.000Z',
+    revoke_at: '2099-01-03T00:00:00.000Z'
+  }, 99);
+  const second = await fixture.service.createRule({
+    ...ruleInput(6),
+    concurrency_limit: 4,
+    activity_ends_at: '2099-01-02T00:00:00.000Z',
+    revoke_at: '2099-01-04T00:00:00.000Z'
+  }, 99);
+  await fixture.service.claim(first.id, 1);
+  await fixture.service.claim(second.id, 1);
+  assert.equal(fixture.users.get(1).concurrency, 4);
+
+  await fixture.service.updateRule(first.id, {
+    ...ruleInput(5), concurrency_limit: 3,
+    activity_ends_at: '2099-01-03T00:00:00.000Z', revoke_at: '2099-01-04T00:00:00.000Z'
+  }, 99);
+  await fixture.service.updateRule(second.id, {
+    ...ruleInput(6), concurrency_limit: 4,
+    activity_ends_at: '2019-01-01T00:00:00.000Z', revoke_at: '2099-01-04T00:00:00.000Z'
+  }, 99);
+  await fixture.service.restoreScheduledConcurrency();
+  assert.equal(fixture.users.get(1).concurrency, 3);
+  await fixture.service.updateRule(first.id, {
+    ...ruleInput(5), concurrency_limit: 3,
+    activity_ends_at: '2019-01-01T00:00:00.000Z', revoke_at: '2099-01-04T00:00:00.000Z'
+  }, 99);
+  await fixture.service.restoreScheduledConcurrency();
+  assert.equal(fixture.users.get(1).concurrency, 7);
+});
+
+test('并发恢复失败后会在下一个调度周期重试', async (t) => {
+  const fixture = createFixture();
+  t.after(() => fixture.db.close());
+  fixture.users.get(1).concurrency = 8;
+  const rule = await fixture.service.createRule({
+    ...ruleInput(5),
+    concurrency_limit: 3,
+    activity_ends_at: '2099-01-01T00:00:00.000Z',
+    revoke_at: '2099-01-02T00:00:00.000Z'
+  }, 99);
+  await fixture.service.claim(rule.id, 1);
+  await fixture.service.updateRule(rule.id, {
+    ...ruleInput(5), concurrency_limit: 3,
+    activity_ends_at: '2019-01-01T00:00:00.000Z', revoke_at: '2099-01-02T00:00:00.000Z'
+  }, 99);
+
+  fixture.failNextUpdates(1);
+  const [failed] = await fixture.service.restoreScheduledConcurrency();
+  assert.equal(failed.status, 'failed');
+  assert.equal(fixture.users.get(1).concurrency, 3);
+  const [retried] = await fixture.service.restoreScheduledConcurrency();
+  assert.equal(retried.status, 'restored');
+  assert.equal(fixture.users.get(1).concurrency, 8);
+});
+
 test('条件不满足时返回具体原因且不写入分组', async (t) => {
   const fixture = createFixture();
   t.after(() => fixture.db.close());
@@ -229,6 +324,25 @@ test('管理员可以提前停用活动并撤销扩展发放的分组', async (t
   assert.deepEqual(fixture.users.get(1).allowed_groups, [9]);
 });
 
+test('管理员提前撤销时同时恢复临时并发数', async (t) => {
+  const fixture = createFixture();
+  t.after(() => fixture.db.close());
+  fixture.users.get(1).concurrency = 9;
+  const rule = await fixture.service.createRule({
+    ...ruleInput(5),
+    concurrency_limit: 3,
+    activity_ends_at: '2099-01-01T00:00:00.000Z',
+    revoke_at: '2099-01-02T00:00:00.000Z'
+  }, 99);
+  await fixture.service.claim(rule.id, 1);
+  assert.equal(fixture.users.get(1).concurrency, 3);
+
+  const revoked = await fixture.service.revokeNow(rule.id, 99);
+  assert.equal(revoked.revoked_count, 1);
+  assert.equal(fixture.users.get(1).concurrency, 9);
+  assert.equal(fixture.db.prepare('SELECT status FROM group_entitlement_concurrency_overrides').get().status, 'restored');
+});
+
 test('分组撤销时间必须晚于活动结束时间', async (t) => {
   const fixture = createFixture();
   t.after(() => fixture.db.close());
@@ -272,7 +386,7 @@ test('数据库升级会把旧自动规则转换为手动申请', () => {
     db = openDatabase(path);
     const row = db.prepare('SELECT assignment_mode, revoke_when_ineligible FROM group_entitlement_rules').get();
     assert.deepEqual({ ...row }, { assignment_mode: 'claim', revoke_when_ineligible: 0 });
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 14);
     db.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -331,14 +445,29 @@ function createFixture(groupIds = [5]) {
       }
       return { items: [], total: 0, total_recharged: id === 1 ? 50 : 0 };
     },
-    async updateUserAllowedGroups(userId, allowedGroups) {
+    async updateUserAllowedGroups(userId, allowedGroups, concurrency = undefined) {
       if (updateFailuresRemaining > 0) {
         updateFailuresRemaining -= 1;
         throw new Error('模拟 Sub2API 更新失败');
       }
       const id = Number(userId);
       users.get(id).allowed_groups = [...allowedGroups];
-      updates.push({ user_id: id, allowed_groups: [...allowedGroups] });
+      if (concurrency !== undefined) users.get(id).concurrency = Number(concurrency);
+      updates.push({
+        user_id: id,
+        allowed_groups: [...allowedGroups],
+        ...(concurrency !== undefined ? { concurrency: Number(concurrency) } : {})
+      });
+      return clone(users.get(id));
+    },
+    async updateUserConcurrency(userId, concurrency) {
+      if (updateFailuresRemaining > 0) {
+        updateFailuresRemaining -= 1;
+        throw new Error('模拟 Sub2API 更新失败');
+      }
+      const id = Number(userId);
+      users.get(id).concurrency = Number(concurrency);
+      updates.push({ user_id: id, concurrency: Number(concurrency) });
       return clone(users.get(id));
     }
   };
@@ -376,6 +505,7 @@ function user(id, balance, totalRecharged, allowedGroups) {
     balance,
     total_recharged: totalRecharged,
     allowed_groups: [...allowedGroups],
+    concurrency: 0,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-07-31T00:00:00Z'
   };

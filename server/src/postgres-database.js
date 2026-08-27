@@ -15,6 +15,7 @@ const IDENTITY_TABLES = new Set([
   'audit_events',
   'group_entitlement_rules',
   'group_entitlement_memberships',
+  'group_entitlement_concurrency_overrides',
   'group_entitlement_runs',
   'checkin_campaigns',
   'checkin_records',
